@@ -5,3 +5,11 @@ id_ed25519*
 !*.pub
 .env
 *.log
+
+# personal, tenancy-specific reference material — never commit these
+scratch/*
+!scratch/README.md
+
+# personal, tenancy-specific reference material — never commit these
+scratch/*
+!scratch/README.md
