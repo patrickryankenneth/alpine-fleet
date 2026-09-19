@@ -1,0 +1,38 @@
+# Non-interactive answerfile for `setup-alpine -f <this-file>`
+# Tuned for OCI VM.Standard.E2.1.Micro (and similar small free-tier shapes).
+#
+# Usage (from the live Alpine environment after kexec):
+#   setup-alpine -f oci-e2-micro.answerfile
+#
+# NOTE: this uses DHCP rather than a static IP + manual netmask, since
+# OCI's VCN subnets hand out DHCP correctly and it sidesteps having to
+# guess/know the subnet's real netmask (setup-alpine's default guess
+# based on IP class is very often wrong for cloud VCNs).
+
+KEYMAPOPTS="us us"
+HOSTNAMEOPTS="-n alpine-worker"
+
+INTERFACESOPTS="auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet dhcp
+"
+
+# 169.254.169.254 is OCI's metadata service, which proxies DNS correctly
+# inside the VCN. Adjust for other providers.
+DNSOPTS="-d '' 169.254.169.254"
+
+TIMEZONEOPTS="-z UTC"
+PROXYOPTS="none"
+APKREPOSOPTS="-1"
+SSHDOPTS="-c openssh"
+NTPOPTS="-c chrony"
+
+# sda is OCI's boot volume device name for these shapes. Verify with
+# `lsblk` in the live environment before trusting this blindly on a
+# different provider/shape.
+DISKOPTS="-m sys /dev/sda"
+
+LBUOPTS="none"
+APKCACHEOPTS="none"
