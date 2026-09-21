@@ -6,10 +6,12 @@
 # Each cycle terminates the state-file E2 instance (if any), then lets
 # orchestrate.py launch a fresh one and drive it to the final state. Stops at
 # the first failure. The serial transcript of every run is kept at
-# state/serial-run<N>.log.
+# ~/.local/state/alpine-fleet/serial-run<N>.log.
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-STATE="$DIR/../state/current-instance.json"
+STATE_DIR="${ALPINE_FLEET_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/alpine-fleet}"
+export ALPINE_FLEET_STATE_DIR="$STATE_DIR"
+STATE="$STATE_DIR/current-instance.json"
 RUNS=1; ORCH_ARGS=(); PREPARE=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -21,7 +23,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ $PREPARE == 1 ]]; then
-  "$DIR/prepare-kexec-cache.sh" || echo "WARN: cache preparation failed — continuing without the cache" >&2
+  bash "$DIR/prepare-kexec-cache.sh" || echo "WARN: cache preparation failed — continuing without the cache" >&2
 fi
 
 fail() { echo "FAIL (run $i/$RUNS): $*" >&2; exit 1; }
@@ -31,9 +33,10 @@ for i in $(seq 1 "$RUNS"); do
   start=$(date +%s)
 
   echo "== teardown =="
+  td_start=$(date +%s)
   if [ -f "$STATE" ]; then
     TD_LOG="$(mktemp)"
-    "$DIR/teardown-e2.sh" --yes 2>&1 | tee "$TD_LOG"; td_rc=${PIPESTATUS[0]}
+    bash "$DIR/teardown-e2.sh" --yes 2>&1 | tee "$TD_LOG"; td_rc=${PIPESTATUS[0]}
     if [[ $td_rc -ne 0 ]]; then
       if grep -q "not among RUNNING instances" "$TD_LOG"; then
         echo "instance in the state file is already gone (e.g. an interrupted earlier run) — clearing stale state"
@@ -47,9 +50,10 @@ for i in $(seq 1 "$RUNS"); do
     echo "no state file — nothing to tear down"
   fi
 
+  echo "teardown took $(( $(date +%s) - td_start ))s"
   echo "== orchestrate (launch + jump + install + harden) =="
-  python3 "$DIR/orchestrate.py" "${ORCH_ARGS[@]}" || fail "orchestrate (see state/serial.log)"
-  cp "$DIR/../state/serial.log" "$DIR/../state/serial-run$i.log" 2>/dev/null || true
+  python3 "$DIR/orchestrate.py" "${ORCH_ARGS[@]}" || fail "orchestrate (see $STATE_DIR/serial.log)"
+  cp "$STATE_DIR/serial.log" "$STATE_DIR/serial-run$i.log" 2>/dev/null || true
 
   echo "== assert =="
   [ -f "$STATE" ] || fail "no state file after orchestrate"

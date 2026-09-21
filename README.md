@@ -15,11 +15,11 @@ alpine-fleet up              # launch (if needed), convert, harden, verify
 
 ## 📊 Why do this? (The RAM Vampire)
 
-The E2.1.Micro free-tier instance has 1 GB of RAM, so what the OS itself uses matters. Measured on OCI PHX over four runs:
+The E2.1.Micro free-tier instance has 1 GB of RAM, so what the OS itself uses matters. Measured on OCI PHX over five runs:
 
 | Metric | Stock Oracle Linux 7.9 | Alpine Linux 3.24 |
 | :--- | :--- | :--- |
-| **RAM available to workloads** | 289–316 MB | **778–792 MB** |
+| **RAM available to workloads** | 288–316 MB | **778–792 MB** |
 | **In use (total − available)** | 351–379 MB | **167–181 MB** |
 | **Total the kernel reports** | 668 MB | 960 MB |
 
