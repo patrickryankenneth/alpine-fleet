@@ -8,7 +8,8 @@ dynamic = ["version"]
 description = "Declaratively and repeatably turn a disposable OCI E2.1.Micro VM into a lightweight, hardened Alpine Linux machine via kexec."
 readme = "README.md"
 requires-python = ">=3.9"
-license = "MIT"                                  # pick your license; keep in sync with LICENSE
+authors = [{ name = "Patrick Ryan", email = "patrickryankenneth@gmail.com" }]
+license = "MIT"                                
 license-files = ["LICENSE", "licenses/*", "THIRD_PARTY_NOTICES.txt"]
 keywords = ["alpine", "oci", "oracle-cloud", "kexec", "free-tier", "provisioning"]
 classifiers = [
@@ -36,6 +37,8 @@ packages = ["src/alpine_fleet"]
 exclude = ["src/alpine_fleet/scripts/e2e-test.sh"]   # destructive dev test, stays in the repo only
 
 [tool.hatch.build.targets.sdist]
-include = ["src/alpine_fleet", "README.md", "LICENSE", "licenses", "pyproject.toml"]
-[tool.hatch.build.targets.sdist]
 include = ["src/alpine_fleet", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.txt", "licenses", "pyproject.toml"]
+
+[project.urls]
+Homepage = "https://github.patrickryankenneth.com/patrickryankenneth/alpine-fleet"
+Issues = "https://github.com/patrickryankenneth/alpine-fleet/issues"
