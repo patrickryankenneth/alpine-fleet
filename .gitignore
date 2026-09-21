@@ -13,3 +13,6 @@ scratch/*
 # personal, tenancy-specific reference material — never commit these
 scratch/*
 !scratch/README.md
+state/
+cache/
+__pycache__/
