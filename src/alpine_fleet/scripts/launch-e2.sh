@@ -154,7 +154,7 @@ echo "=== DONE ==="
 echo "Instance OCID: $NEW_INSTANCE_ID"
 echo "Public IP:     $PUBLIC_IP"
 
-STATE_DIR="$DIR/../state"
+STATE_DIR="${ALPINE_FLEET_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/alpine-fleet}"
 mkdir -p "$STATE_DIR"
 STATE_FILE="$STATE_DIR/current-instance.json"
 if command -v jq >/dev/null; then

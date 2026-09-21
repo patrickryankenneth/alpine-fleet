@@ -6,7 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/oci-common.sh"
-STATE_FILE="$SCRIPT_DIR/../state/current-instance.json"
+STATE_FILE="${ALPINE_FLEET_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/alpine-fleet}/current-instance.json"
 
 TARGET=""; YES=false; LIST=false
 while [[ $# -gt 0 ]]; do

@@ -13,3 +13,17 @@ scratch/*
 state/
 cache/
 __pycache__/
+
+# packaging
+dist/
+build/
+*.egg-info/
+__pycache__/
+
+# gitship internal state (auto-added by gitship)
+.gitship/
+
+# gitship diff exports (auto-added by gitship)
+gitship_exports/
+
+# Auto-generated license files

@@ -104,7 +104,12 @@ def load_state(state_file: Path) -> dict:
 
 
 def find_oci():
-    found = os.environ.get("OCI_BIN") or shutil.which("oci")
+    found = os.environ.get("OCI_BIN")
+    if not found:
+        # pip/pipx install of alpine-fleet[oci]: the oci script sits beside this
+        # interpreter but pipx does not put dependency scripts on PATH.
+        venv_oci = Path(sys.executable).parent / "oci"
+        found = str(venv_oci) if venv_oci.exists() else shutil.which("oci")
     if not found:
         sys.exit("FATAL: oci CLI not found on PATH (set OCI_BIN to override).")
     return found
@@ -133,7 +138,7 @@ def ensure_instance(state_file: Path, script_dir: str) -> dict:
         state_file.rename(stale)
     print("[orchestrate] no live instance — launching one via launch-e2.sh "
           "(retries until capacity appears; Ctrl-C to abort)...")
-    rc = subprocess.run([f"{script_dir}/launch-e2.sh"]).returncode
+    rc = subprocess.run(["bash", f"{script_dir}/launch-e2.sh"]).returncode
     if rc != 0:
         sys.exit(f"FATAL: launch-e2.sh failed (exit {rc}).")
     if not state_file.exists():
@@ -145,7 +150,7 @@ def ensure_instance(state_file: Path, script_dir: str) -> dict:
 
 def get_console_connection_string(instance_ocid: str, key_path: str, script_dir: str) -> str:
     result = subprocess.run(
-        [f"{script_dir}/console-connect.sh", "--instance-id", instance_ocid, "--key", key_path],
+        ["bash", f"{script_dir}/console-connect.sh", "--instance-id", instance_ocid, "--key", key_path],
         capture_output=True, text=True, check=True,
     )
     lines = [l for l in result.stdout.strip().splitlines() if l.strip()]
@@ -364,7 +369,9 @@ def fresh_key_login(ip, tries=8, delay=5):
 
 def main():
     default_script_dir = Path(__file__).resolve().parent
-    default_state_file = default_script_dir.parent / "state" / "current-instance.json"
+    default_state_dir = Path(os.environ.get("ALPINE_FLEET_STATE_DIR")
+                             or Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "alpine-fleet")
+    default_state_file = default_state_dir / "current-instance.json"
     default_answerfile = default_script_dir.parent / "answerfiles" / "oci-e2-micro.answerfile"
 
     ap = argparse.ArgumentParser()
@@ -380,20 +387,20 @@ def main():
     ap.add_argument("--alpine-version", default="v3.24")
     ap.add_argument("--debug", "-v", action="store_true",
                      help="Echo the raw serial console and bootstrap.sh output live.")
-    ap.add_argument("--serial-log", default=str(default_script_dir.parent / "state" / "serial.log"),
-                     help="Where the cleaned serial transcript is written (default: state/serial.log).")
+    ap.add_argument("--serial-log", default=str(default_state_dir / "serial.log"),
+                     help=f"Where the cleaned serial transcript is written (default: {default_state_dir / 'serial.log'}).")
     ap.add_argument("--no-launch", action="store_true",
                      help="Never launch an instance; fail if the state file has none.")
     ap.add_argument("--ssh-pubkey", default=str(Path.home() / ".ssh" / "id_ed25519.pub"),
                      help="Public key installed into /root/.ssh/authorized_keys on the "
                           "live RAM environment BEFORE setup-disk runs, so it carries "
-                          "over onto the installed disk (setup-disk -m sys copies the "
-                          "running root filesystem, including /root/.ssh). Root's "
-                          "password is still set interactively by setup-alpine (Alpine's "
-                          "answerfile format has no way to skip that step) — this script "
-                          "auto-answers it with a random throwaway, then locks password "
-                          "login entirely afterward so only this key can get in.")
+                          "over onto the installed disk. After the install, root's "
+                          "password field is set to '*' and sshd is set to key-only, "
+                          "so this key is the only way in.")
     args = ap.parse_args()
+
+    if not args.no_launch and not Path(args.ssh_pubkey).exists():
+        sys.exit(f"FATAL: --ssh-pubkey not found at {args.ssh_pubkey} (checked before launching anything).")
 
     if args.ssh_target is None or args.instance_ocid is None:
         if args.no_launch:
@@ -464,7 +471,7 @@ def main():
             print("\n".join("    " + l for l in ram_before_raw.splitlines()))
         print("[orchestrate] staging via network SSH...")
         staging = subprocess.run(
-            [f"{args.script_dir}/bootstrap.sh", args.ssh_target, args.alpine_version, args.answerfile],
+            ["bash", f"{args.script_dir}/bootstrap.sh", args.ssh_target, args.alpine_version, args.answerfile],
             input="y\n", text=True, capture_output=not args.debug)
         if staging.returncode != 0:
             if not args.debug:

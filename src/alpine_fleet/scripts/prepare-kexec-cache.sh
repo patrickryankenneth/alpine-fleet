@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # prepare-kexec-cache.sh — build the host-side kexec cache that bootstrap.sh
-# picks up automatically (cache/kexec/ol-7/kexec).
+# picks up automatically (~/.cache/alpine-fleet/kexec/ol-7/kexec, or $KEXEC_CACHE).
 #
 # Why a container: kexec runs on the TARGET'S CURRENT OS (Oracle Linux 7 on the
 # stock OCI image), so it must be an Oracle Linux 7 binary. A CachyOS build needs a
@@ -10,7 +10,7 @@
 # Usage: prepare-kexec-cache.sh [--force]
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OUT="$DIR/../cache/kexec/ol-7"
+OUT="${KEXEC_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/alpine-fleet/kexec}/ol-7"
 IMAGE="${KEXEC_BUILD_IMAGE:-docker.io/library/oraclelinux:7}"
 
 if [[ -x "$OUT/kexec" && "${1:-}" != "--force" ]]; then

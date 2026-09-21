@@ -14,7 +14,7 @@ ANSWERFILE="${3:-$SCRIPT_DIR/../answerfiles/oci-e2-micro.answerfile}"
 ARCH="x86_64"
 
 [[ -f "$ANSWERFILE" ]] || { echo "FATAL: answerfile not found at $ANSWERFILE" >&2; exit 1; }
-ANSWERFILE_B64="$(base64 -w0 "$ANSWERFILE")"
+ANSWERFILE_B64="$(base64 < "$ANSWERFILE" | tr -d '\n')"
 
 TARGET_USER="${TARGET%%@*}"
 if [[ "$TARGET_USER" == "root" ]]; then
@@ -46,7 +46,7 @@ fi
 # (see scripts/prepare-kexec-cache.sh). Layout: cache/kexec/<os-id>-<major>/kexec,
 # e.g. cache/kexec/ol-7/kexec. A fully static binary in cache/kexec/static/kexec
 # works on any x86_64 Linux. Set NO_KEXEC_CACHE=1 to ignore the cache.
-KEXEC_CACHE="${KEXEC_CACHE:-$SCRIPT_DIR/../cache/kexec}"
+KEXEC_CACHE="${KEXEC_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/alpine-fleet/kexec}"
 USE_CACHED_KEXEC=0
 if [[ "${NO_KEXEC_CACHE:-0}" != "1" ]]; then
     OS_ID="$(ssh -o BatchMode=yes "$TARGET" '. /etc/os-release && echo "${ID}-${VERSION_ID%%.*}"' 2>/dev/null || true)"

@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "alpine-fleet"
+dynamic = ["version"]
+description = "Declaratively and repeatably turn a disposable OCI E2.1.Micro VM into a lightweight, hardened Alpine Linux machine via kexec."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"                                  # pick your license; keep in sync with LICENSE
+license-files = ["LICENSE", "licenses/*", "THIRD_PARTY_NOTICES.txt"]
+keywords = ["alpine", "oci", "oracle-cloud", "kexec", "free-tier", "provisioning"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Intended Audience :: System Administrators",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: System :: Installation/Setup",
+]
+dependencies = ["pexpect>=4.8"]
+
+[project.optional-dependencies]
+oci = ["oci-cli"]
+
+[project.scripts]
+alpine-fleet = "alpine_fleet.cli:main"
+
+[tool.hatch.version]
+path = "src/alpine_fleet/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/alpine_fleet"]
+exclude = ["src/alpine_fleet/scripts/e2e-test.sh"]   # destructive dev test, stays in the repo only
+
+[tool.hatch.build.targets.sdist]
+include = ["src/alpine_fleet", "README.md", "LICENSE", "licenses", "pyproject.toml"]
+[tool.hatch.build.targets.sdist]
+include = ["src/alpine_fleet", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.txt", "licenses", "pyproject.toml"]

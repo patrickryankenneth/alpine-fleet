@@ -1,0 +1,24 @@
+license-record
+**************
+
+
+Description
+===========
+
+License record summary.
+
+
+Available Commands
+==================
+
+* create
+
+* delete
+
+* get
+
+* import-licenses
+
+* list
+
+* update

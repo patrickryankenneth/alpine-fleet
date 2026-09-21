@@ -1,0 +1,15 @@
+alpine-fleet includes the following third-party software:
+================================================================================
+
+oci-cli (v3.90.2)
+License: Universal Permissive License 1.0 or Apache License 2.0
+See licenses/oci-cli.txt for full license text
+
+pexpect (v4.9.0)
+License: ISC license
+See licenses/pexpect.txt for full license text
+
+ptyprocess (v0.7.0)
+License: ISC
+See licenses/ptyprocess.txt for full license text
+
