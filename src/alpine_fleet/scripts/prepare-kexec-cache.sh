@@ -1,29 +1,41 @@
 #!/usr/bin/env bash
 # prepare-kexec-cache.sh — build the host-side kexec cache that bootstrap.sh
-# picks up automatically (~/.cache/alpine-fleet/kexec/ol-7/kexec, or $KEXEC_CACHE).
+# picks up automatically (~/.cache/alpine-fleet/kexec/<os-id>/kexec, or
+# $KEXEC_CACHE). One cache per target OS, since kexec has to run on the
+# TARGET'S CURRENT OS (whatever the stock cloud image ships), not on this
+# machine and not on Alpine — a CachyOS build needs a far newer glibc than
+# either target has, and a musl (Alpine) build won't run on either.
 #
-# Why a container: kexec runs on the TARGET'S CURRENT OS (Oracle Linux 7 on the
-# stock OCI image), so it must be an Oracle Linux 7 binary. A CachyOS build needs a
-# far newer glibc than OL7 has, and an Alpine (musl) build won't run there either.
-# The container gives us OL7's own userland, so the extracted binary matches the target.
-#
-# Usage: prepare-kexec-cache.sh [--force]
+# Usage: prepare-kexec-cache.sh [--provider oci|gcp|all] [--force]
+#   --provider oci   Oracle Linux 7 (stock OCI image)  -> cache/ol-7
+#   --provider gcp   Debian 12 (stock GCP image)       -> cache/debian-12
+#   --provider all   build every known target (default)
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OUT="${KEXEC_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/alpine-fleet/kexec}/ol-7"
-IMAGE="${KEXEC_BUILD_IMAGE:-docker.io/library/oraclelinux:7}"
+CACHE_BASE="${KEXEC_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/alpine-fleet/kexec}"
 
-if [[ -x "$OUT/kexec" && "${1:-}" != "--force" ]]; then
-  echo "kexec cache already present: $OUT/kexec (use --force to rebuild)"
-  exit 0
-fi
+PROVIDER="all"; FORCE=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --provider) PROVIDER="$2"; shift 2 ;;
+    --force)    FORCE=1; shift ;;
+    *) echo "Usage: prepare-kexec-cache.sh [--provider oci|gcp|all] [--force]" >&2; exit 1 ;;
+  esac
+done
 
 ENGINE="$(command -v podman || command -v docker || true)"
 [[ -n "$ENGINE" ]] || { echo "FATAL: need podman or docker to build the cache" >&2; exit 1; }
-mkdir -p "$OUT"
 
-echo "== building kexec cache for Oracle Linux 7 with $(basename "$ENGINE") ($IMAGE) =="
-"$ENGINE" run --rm -v "$OUT:/out:Z" "$IMAGE" bash -c '
+build_ol7() {
+  local out="$CACHE_BASE/ol-7"
+  local image="${KEXEC_BUILD_IMAGE_OCI:-docker.io/library/oraclelinux:7}"
+  if [[ -x "$out/kexec" && $FORCE != 1 ]]; then
+    echo "kexec cache already present: $out/kexec (use --force to rebuild)"
+    return 0
+  fi
+  mkdir -p "$out"
+  echo "== building kexec cache for Oracle Linux 7 (oci) with $(basename "$ENGINE") ($image) =="
+  "$ENGINE" run --rm -v "$out:/out:Z" "$image" bash -c '
 set -euo pipefail
 yum install -y -q yum-utils cpio
 mkdir -p /tmp/dl /tmp/x
@@ -46,5 +58,46 @@ ldd "$bin"
 "$bin" --version
 install -m 0755 "$bin" /out/kexec
 '
-echo "== done: $OUT/kexec =="
-echo "bootstrap.sh will now copy this to the target instead of installing kexec-tools there."
+  echo "== done: $out/kexec =="
+}
+
+build_debian12() {
+  local out="$CACHE_BASE/debian-12"
+  local image="${KEXEC_BUILD_IMAGE_GCP:-docker.io/library/debian:12-slim}"
+  if [[ -x "$out/kexec" && $FORCE != 1 ]]; then
+    echo "kexec cache already present: $out/kexec (use --force to rebuild)"
+    return 0
+  fi
+  mkdir -p "$out"
+  echo "== building kexec cache for Debian 12 (gcp) with $(basename "$ENGINE") ($image) =="
+  # DEBIAN_FRONTEND=noninteractive matters here for the same reason it does
+  # in bootstrap.sh: kexec-tools asks a debconf question ("Should kexec-tools
+  # handle reboots?") that plain -y does not answer.
+  "$ENGINE" run --rm -v "$out:/out:Z" "$image" bash -c '
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -y -qq kexec-tools
+bin="$(command -v kexec || find / -xdev -type f -name kexec 2>/dev/null | head -1)"
+if [ -z "$bin" ]; then
+  echo "FATAL: no kexec binary found after installing kexec-tools." >&2
+  exit 1
+fi
+echo "binary: $bin"
+echo "--- libraries the binary needs (they must exist on the target):"
+ldd "$bin"
+"$bin" --version
+install -m 0755 "$bin" /out/kexec
+'
+  echo "== done: $out/kexec =="
+}
+
+case "$PROVIDER" in
+  oci) build_ol7 ;;
+  gcp) build_debian12 ;;
+  all) build_ol7; build_debian12 ;;
+  *) echo "Usage: prepare-kexec-cache.sh: unknown --provider '$PROVIDER' (must be oci, gcp, or all)" >&2; exit 1 ;;
+esac
+
+echo
+echo "bootstrap.sh will now copy the matching cached binary to the target instead of installing kexec-tools there."
