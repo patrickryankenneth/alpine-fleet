@@ -58,7 +58,39 @@ while true; do
   CURRENT=$(oci_count_running_by_shape "$OCI_BIN" "$COMPARTMENT_ID" "$SHAPE")
   CURRENT="${CURRENT:-0}"
   if [ "$CURRENT" -ge "$E2_CAP" ]; then
-    echo "Already at cap ($CURRENT/$E2_CAP RUNNING). Nothing to launch. Exiting."
+    echo "Already at cap ($CURRENT/$E2_CAP RUNNING $SHAPE)."
+    if command -v jq >/dev/null; then
+      RUNNING_JSON="$(oci_list_running_instances "$OCI_BIN" "$COMPARTMENT_ID")"
+      SHAPE_JSON="$(echo "$RUNNING_JSON" | jq --arg shape "$SHAPE" '[.[] | select(.shape==$shape)]')"
+      echo
+      echo "Currently running $SHAPE instances:"
+      echo "$SHAPE_JSON" | jq -r --arg dn "$DISPLAY_NAME" \
+        '.[] | (if (.name == $dn or (.name | startswith($dn + "-"))) then "  [reclaimable] " else "  [leave alone]  " end) + "\(.name)\t\(.id)"'
+      # "Reclaimable" means the display name matches what THIS script itself
+      # would create (DISPLAY_NAME, default "micro-worker") — almost
+      # certainly a leftover test-rig instance from an earlier interrupted
+      # run, not a real workload. Anything else (e.g. OCI's own default
+      # "instance-<date>-<time>" auto-naming) is left strictly alone.
+      STALE_ID="$(echo "$SHAPE_JSON" | jq -r --arg dn "$DISPLAY_NAME" \
+        '[.[] | select(.name == $dn or (.name | startswith($dn + "-")))][0].id // empty')"
+      if [ "${RECLAIM_STALE:-0}" = "1" ] && [ -n "$STALE_ID" ]; then
+        echo
+        echo "RECLAIM_STALE=1 — terminating $STALE_ID and retrying..."
+        "$DIR/teardown-e2.sh" --instance-id "$STALE_ID" --yes
+        continue
+      fi
+      echo
+      if [ -n "$STALE_ID" ]; then
+        echo "Instance(s) marked [reclaimable] match DISPLAY_NAME='$DISPLAY_NAME' and are almost certainly"
+        echo "leftover test-rig instances. Either:"
+        echo "  - re-run with RECLAIM_STALE=1 to free one automatically and keep going, or"
+        echo "  - terminate one yourself: $DIR/teardown-e2.sh --instance-id <id> --yes"
+      else
+        echo "None of these match DISPLAY_NAME='$DISPLAY_NAME' — they look like real, non-test instances."
+        echo "Free up a slot yourself before retrying: $DIR/teardown-e2.sh --list"
+      fi
+    fi
+    echo "Nothing to launch. Exiting."
     exit 0
   fi
 
@@ -156,7 +188,7 @@ echo "Public IP:     $PUBLIC_IP"
 
 STATE_DIR="${ALPINE_FLEET_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/alpine-fleet}"
 mkdir -p "$STATE_DIR"
-STATE_FILE="$STATE_DIR/current-instance.json"
+STATE_FILE="$STATE_DIR/current-instance-oci.json"
 if command -v jq >/dev/null; then
   jq -n \
     --arg id "$NEW_INSTANCE_ID" \

@@ -77,7 +77,8 @@ def _orchestrate(args: argparse.Namespace, target: str | None = None, ocid: str 
            "--state-file", str(state / "current-instance.json"),
            "--serial-log", str(state / "serial.log"),
            "--alpine-version", args.alpine_version,
-           "--ssh-pubkey", args.ssh_pubkey]
+           "--ssh-pubkey", args.ssh_pubkey,
+           "--provider", args.provider]
     if args.console_key:
         cmd += ["--key", args.console_key]
     if args.debug:
@@ -97,6 +98,7 @@ def _add_run_flags(p: argparse.ArgumentParser) -> None:
                    help="public key installed for root (default: %(default)s)")
     p.add_argument("--console-key", default=None, help="RSA key for the OCI serial console (default: ~/.ssh/oci-console-rsa)")
     p.add_argument("--answerfile", default=str(ANSWERFILE), help="setup-alpine answerfile (default: the bundled OCI one)")
+    p.add_argument("--provider", choices=["oci", "gcp"], default="oci", help="cloud provider (default: %(default)s)")
 
 
 def build_parser() -> argparse.ArgumentParser:

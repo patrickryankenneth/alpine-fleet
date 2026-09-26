@@ -85,7 +85,7 @@ else
     echo "[remote] cached kexec unavailable or unusable — installing kexec-tools..."
     sudo rm -f /usr/sbin/kexec   # drop a cached binary that failed its --version check
     if command -v apt >/dev/null; then
-        sudo apt-get update -qq && sudo apt-get install -y -qq kexec-tools
+        sudo apt-get update -qq && sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq kexec-tools
     elif command -v dnf >/dev/null; then
         sudo dnf install -y kexec-tools
     elif command -v yum >/dev/null; then

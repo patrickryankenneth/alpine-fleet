@@ -9,6 +9,7 @@ Every run detects where the box is and resumes from there:
   installed  root SSH, / on /dev/sda*  -> verify + harden (lock root)
 """
 import argparse
+import atexit
 import base64
 import re
 import json
@@ -93,7 +94,7 @@ def load_state(state_file: Path) -> dict:
     if not state_file.exists():
         sys.exit(
             f"FATAL: no ssh_target/instance_ocid given and no state file at {state_file}.\n"
-            f"Either pass both explicitly, or run launch-e2.sh first (it writes this file)."
+            f"Either pass both explicitly, or run launch-e2.sh/launch-gcp.sh first (it writes this file)."
         )
     try:
         return json.loads(state_file.read_text())
@@ -101,6 +102,9 @@ def load_state(state_file: Path) -> dict:
         sys.exit(f"FATAL: {state_file} is not valid JSON: {e}")
 
 
+
+
+PROVIDER_LABEL = {"oci": "Oracle Linux (OCI)", "gcp": "Debian (GCP)"}
 
 
 def find_oci():
@@ -115,7 +119,24 @@ def find_oci():
     return found
 
 
-def instance_running(instance_id):
+def find_gcloud():
+    found = os.environ.get("GCLOUD_BIN") or shutil.which("gcloud")
+    if not found:
+        sys.exit("FATAL: gcloud CLI not found on PATH (set GCLOUD_BIN to override).")
+    return found
+
+
+def instance_running(instance_id, provider="oci"):
+    """GCP instances are identified by name, not an OCID, and 'running' has
+    to be checked project-wide (no zone on hand here) — mirrors how
+    console-connect-gcp.sh looks an instance up without a zone."""
+    if provider == "gcp":
+        p = subprocess.run(
+            [find_gcloud(), "compute", "instances", "list",
+             "--filter", f"name={instance_id} AND status=RUNNING",
+             "--format", "value(name)"],
+            capture_output=True, text=True)
+        return p.returncode == 0 and instance_id in p.stdout.split()
     p = subprocess.run(
         [find_oci(), "compute", "instance", "get", "--instance-id", instance_id,
          "--query", 'data."lifecycle-state"', "--raw-output"],
@@ -123,39 +144,43 @@ def instance_running(instance_id):
     return p.returncode == 0 and p.stdout.strip() == "RUNNING"
 
 
-def ensure_instance(state_file: Path, script_dir: str) -> dict:
-    """Return the state dict of a RUNNING instance, launching one via
-    launch-e2.sh if the state file is missing or points at a dead instance."""
+def ensure_instance(state_file: Path, script_dir: str, provider: str) -> dict:
+    """Return the state dict of a RUNNING instance, launching one via the
+    provider's launch script if the state file is missing or points at a
+    dead instance."""
     if state_file.exists():
         try:
             st = json.loads(state_file.read_text())
         except json.JSONDecodeError:
             st = {}
-        if st.get("instance_id") and instance_running(st["instance_id"]):
+        if st.get("instance_id") and instance_running(st["instance_id"], provider):
             return st
         stale = state_file.with_name(state_file.name + ".stale")
         print(f"[orchestrate] state file points at a non-RUNNING instance — moving to {stale.name}")
         state_file.rename(stale)
-    print("[orchestrate] no live instance — launching one via launch-e2.sh "
+    launch_script = "launch-e2.sh" if provider == "oci" else "launch-gcp.sh"
+    cap_note = "2/2 E2 RUNNING" if provider == "oci" else "1/1 free-tier e2-micro RUNNING"
+    print(f"[orchestrate] no live instance — launching one via {launch_script} "
           "(retries until capacity appears; Ctrl-C to abort)...")
-    rc = subprocess.run(["bash", f"{script_dir}/launch-e2.sh"]).returncode
+    rc = subprocess.run(["bash", f"{script_dir}/{launch_script}"]).returncode
     if rc != 0:
-        sys.exit(f"FATAL: launch-e2.sh failed (exit {rc}).")
+        sys.exit(f"FATAL: {launch_script} failed (exit {rc}).")
     if not state_file.exists():
-        sys.exit("FATAL: launch-e2.sh exited 0 but wrote no state file — it most likely "
-                 "hit 'already at cap' (2/2 E2 RUNNING). Terminate one or pass "
+        sys.exit(f"FATAL: {launch_script} exited 0 but wrote no state file — it most likely "
+                 f"hit 'already at cap' ({cap_note}). Terminate one or pass "
                  "ssh_target and instance_ocid explicitly.")
     return json.loads(state_file.read_text())
 
 
-def get_console_connection_string(instance_ocid: str, key_path: str, script_dir: str) -> str:
+def get_console_connection_string(instance_id: str, key_path: str, script_dir: str, provider: str) -> str:
+    script = "console-connect.sh" if provider == "oci" else "console-connect-gcp.sh"
     result = subprocess.run(
-        ["bash", f"{script_dir}/console-connect.sh", "--instance-id", instance_ocid, "--key", key_path],
+        ["bash", f"{script_dir}/{script}", "--instance-id", instance_id, "--key", key_path],
         capture_output=True, text=True, check=True,
     )
     lines = [l for l in result.stdout.strip().splitlines() if l.strip()]
     if not lines:
-        sys.exit("FATAL: console-connect.sh produced no connection string on stdout")
+        sys.exit(f"FATAL: {script} produced no connection string on stdout")
     return lines[-1]
 
 
@@ -189,14 +214,27 @@ def push_answerfile_over_serial(console, answerfile_path, remote_path="/root/ans
 
 
 def login_to_alpine(console, attempts=6):
-    """Ctrl-C, never Enter: Enter would answer whatever prompt a stale
-    setup-alpine is parked at (default at the erase prompt is 'n')."""
-    for _ in range(attempts):
-        console.sendcontrol("c")
+    """Never Enter: Enter would answer whatever prompt a stale
+    setup-alpine is parked at (default at the erase prompt is 'n').
+    Check for an already-live login:/prompt first — only send Ctrl-C
+    when nothing answers, since Ctrl-C'ing a stable login: prompt can
+    itself make agetty abort/respawn and reprint the banner."""
+    for attempt in range(attempts):
+        if attempt > 0:
+            console.sendcontrol("c")
         idx = console.expect(["login:", PROMPT, pexpect.TIMEOUT], timeout=5)
         if idx == 0:
             console.sendline("root")
-            console.expect(PROMPT, timeout=15)
+            pw_idx = console.expect(["Password:", PROMPT, pexpect.TIMEOUT], timeout=15)
+            if pw_idx == 0:
+                console.sendline("")  # freshly installed root has no password set
+                try:
+                    console.expect(PROMPT, timeout=15)
+                except pexpect.TIMEOUT:
+                    sys.exit("FATAL: sent blank password but no shell prompt followed — "
+                             "root may have a real password set; check via serial.")
+            elif pw_idx == 2:
+                sys.exit("FATAL: no shell prompt after logging in as root.")
             break
         if idx == 1:
             break
@@ -277,11 +315,17 @@ def wait_for_state(ip, ssh_target, secs, want=None):
 
 
 def install_complete(ip):
-    """RAM env only: does /dev/sda3 hold a finished Alpine install?"""
+    """RAM env only: does any /dev/sda* partition hold a finished Alpine
+    install? Partition number varies by boot mode (BIOS vs UEFI puts root
+    in a different slot), so probe rather than assume."""
     rc, _ = ssh_run(
         f"root@{ip}",
-        "mkdir -p /mnt/chk && mount -o ro /dev/sda3 /mnt/chk 2>/dev/null; "
-        "test -f /mnt/chk/etc/alpine-release; rc=$?; umount /mnt/chk 2>/dev/null; exit $rc")
+        "mkdir -p /mnt/chk; "
+        "for p in /dev/sda[0-9]*; do "
+        "  mount -o ro \"$p\" /mnt/chk 2>/dev/null || continue; "
+        "  if [ -f /mnt/chk/etc/alpine-release ]; then umount /mnt/chk; exit 0; fi; "
+        "  umount /mnt/chk 2>/dev/null; "
+        "done; exit 1")
     return rc == 0
 
 
@@ -371,7 +415,6 @@ def main():
     default_script_dir = Path(__file__).resolve().parent
     default_state_dir = Path(os.environ.get("ALPINE_FLEET_STATE_DIR")
                              or Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "alpine-fleet")
-    default_state_file = default_state_dir / "current-instance.json"
     default_answerfile = default_script_dir.parent / "answerfiles" / "oci-e2-micro.answerfile"
 
     ap = argparse.ArgumentParser()
@@ -379,8 +422,8 @@ def main():
                      help="<user>@<instance-ip>. Omit to read from --state-file.")
     ap.add_argument("instance_ocid", nargs="?", default=None,
                      help="OCID of target instance. Omit to read from --state-file.")
-    ap.add_argument("--state-file", default=str(default_state_file),
-                     help=f"JSON state file (default: {default_state_file})")
+    ap.add_argument("--state-file", default=None,
+                     help="JSON state file (default: <state-dir>/current-instance-<provider>.json)")
     ap.add_argument("--key", default=str(Path.home() / ".ssh" / "oci-console-rsa"))
     ap.add_argument("--script-dir", default=str(default_script_dir))
     ap.add_argument("--answerfile", default=str(default_answerfile))
@@ -391,6 +434,8 @@ def main():
                      help=f"Where the cleaned serial transcript is written (default: {default_state_dir / 'serial.log'}).")
     ap.add_argument("--no-launch", action="store_true",
                      help="Never launch an instance; fail if the state file has none.")
+    ap.add_argument("--provider", choices=["oci", "gcp"], default="oci",
+                     help="cloud provider console/backend to use (default: %(default)s)")
     ap.add_argument("--ssh-pubkey", default=str(Path.home() / ".ssh" / "id_ed25519.pub"),
                      help="Public key installed into /root/.ssh/authorized_keys on the "
                           "live RAM environment BEFORE setup-disk runs, so it carries "
@@ -398,6 +443,8 @@ def main():
                           "password field is set to '*' and sshd is set to key-only, "
                           "so this key is the only way in.")
     args = ap.parse_args()
+    if args.state_file is None:
+        args.state_file = str(default_state_dir / f"current-instance-{args.provider}.json")
 
     if not args.no_launch and not Path(args.ssh_pubkey).exists():
         sys.exit(f"FATAL: --ssh-pubkey not found at {args.ssh_pubkey} (checked before launching anything).")
@@ -406,7 +453,7 @@ def main():
         if args.no_launch:
             st = load_state(Path(args.state_file))
         else:
-            st = ensure_instance(Path(args.state_file), args.script_dir)
+            st = ensure_instance(Path(args.state_file), args.script_dir, args.provider)
             mark("instance launched + public IP")
         if args.instance_ocid is None:
             args.instance_ocid = st.get("instance_id")
@@ -420,11 +467,18 @@ def main():
             sys.exit(f"FATAL: {args.state_file} has no instance_id field.")
         print(f"[orchestrate] using state file: ssh_target={args.ssh_target} instance_ocid={args.instance_ocid}")
 
-    conn_cmd = get_console_connection_string(args.instance_ocid, args.key, args.script_dir)
+    conn_cmd = get_console_connection_string(args.instance_ocid, args.key, args.script_dir, args.provider)
     print(f"[orchestrate] serial command: {conn_cmd}")
+
+    if args.provider == "gcp":
+        subprocess.run(
+            ["pkill", "-f", f"connect-to-serial-port.*{args.instance_ocid}"],
+            stderr=subprocess.DEVNULL,
+        )
 
     print("[orchestrate] opening serial console session...")
     console = pexpect.spawn(conn_cmd, timeout=30, encoding="utf-8")
+    atexit.register(lambda: console.isalive() and console.close(force=True))
     global SERIAL_LOG
     SERIAL_LOG = SerialLog(args.serial_log, echo=args.debug)
     console.logfile_read = SERIAL_LOG
@@ -434,11 +488,34 @@ def main():
     # otherwise the banner's doc URL (which contains a "#fragment") is
     # left sitting in the buffer and can falsely satisfy a later PROMPT
     # match before the real shell prompt ever arrives.
-    try:
-        console.expect("IMPORTANT", timeout=25)
-        console.expect("=================================================", timeout=10)
-    except pexpect.TIMEOUT:
-        sys.exit("FATAL: never saw OCI console banner. Aborting before jump.")
+    at_login_prompt = False
+    if args.provider == "oci":
+        try:
+            console.expect("IMPORTANT", timeout=25)
+            console.expect("=================================================", timeout=10)
+        except pexpect.TIMEOUT:
+            sys.exit("FATAL: never saw OCI console banner. Aborting before jump.")
+    else:
+        # GCP's serial proxy has no banner of its own — nudge the line and
+        # confirm something answers before trusting the console to jump.
+        #
+        # Must match "localhost login:" specifically, not bare "login:":
+        # a fresh stock image's OWN getty also prints "<hostname> login:"
+        # on the serial port well before its network/sshd is up, and
+        # would otherwise be mistaken for Alpine's live env (whose
+        # default hostname really is "localhost" — see the post-kexec
+        # console.expect("localhost login:", ...) below) and short-circuit
+        # straight into a bogus serial root login on stock Debian/OCI.
+        console.sendline("")
+        try:
+            confirm_idx = console.expect(["localhost login:", PROMPT, pexpect.TIMEOUT], timeout=25)
+        except pexpect.TIMEOUT:
+            sys.exit("FATAL: no response on GCP serial console. Aborting before jump.")
+        # idx 0 means we're already sitting at Alpine's live serial login
+        # prompt (a resumed run after a previous kexec) — SSH/network is
+        # guaranteed not up yet, so don't waste up to 90s polling SSH
+        # first; go straight to serial.
+        at_login_prompt = (confirm_idx == 0)
 
     print("\n[orchestrate] console confirmed live.")
     mark("serial console connection live")
@@ -456,10 +533,15 @@ def main():
         ensure_sshd(console)
         serial_used = True
 
-    state = detect_state(ip, args.ssh_target)
-    if state == "unknown":
-        print("[orchestrate] nothing answers on SSH — waiting up to 90s (may be mid-reboot)...")
-        state = wait_for_state(ip, args.ssh_target, 90)
+    if args.provider == "gcp" and at_login_prompt:
+        print("[orchestrate] console already at login: prompt — skipping SSH wait, going straight to serial.")
+        serial_prepare()
+        state = detect_state(ip, args.ssh_target)
+    else:
+        state = detect_state(ip, args.ssh_target)
+        if state == "unknown":
+            print("[orchestrate] nothing answers on SSH — waiting up to 90s (may be mid-reboot)...")
+            state = wait_for_state(ip, args.ssh_target, 90)
     print(f"[orchestrate] detected state: {state}")
     mark("stock OS reachable (waiting for it to boot)")
 
@@ -467,7 +549,8 @@ def main():
     if state == "prejump":
         ram_before, ram_before_raw = read_ram(args.ssh_target)
         if ram_before:
-            print("[orchestrate] RAM on the stock OCI image, before the jump:")
+            stock_label = PROVIDER_LABEL.get(args.provider, args.provider)
+            print(f"[orchestrate] RAM on the stock {stock_label} image, before the jump:")
             print("\n".join("    " + l for l in ram_before_raw.splitlines()))
         print("[orchestrate] staging via network SSH...")
         staging = subprocess.run(
@@ -521,7 +604,7 @@ def main():
             print("[orchestrate] running: setup-alpine -e -f /root/answers")
             console.sendline("setup-alpine -e -f /root/answers")
             if console.expect(["Setup a user", pexpect.TIMEOUT], timeout=30) == 0:
-                console.sendline("")
+                console.sendline("no")
             if console.expect(["Erase the above disk", pexpect.TIMEOUT], timeout=60) != 0:
                 sys.exit("FATAL: never saw erase confirmation within 60s — not guessing 'y'.")
             console.sendline("y")
@@ -586,7 +669,8 @@ def main():
         if ram_before:
             b_used, b_total, b_avail = ram_before
             gain = a_avail - b_avail
-            print(f"[orchestrate] RAM available to workloads: {b_avail} MB (stock OCI image) -> {a_avail} MB (Alpine)"
+            stock_label = PROVIDER_LABEL.get(args.provider, args.provider)
+            print(f"[orchestrate] RAM available to workloads: {b_avail} MB (stock {stock_label} image) -> {a_avail} MB (Alpine)"
                   f" = +{gain} MB ({a_avail / b_avail:.1f}x)" if b_avail else "")
             print(f"[orchestrate]   in use (total-available): {b_used} MB -> {a_used} MB;"
                   f" kernel-visible total: {b_total} MB -> {a_total} MB (each kernel reserves different memory at boot)")

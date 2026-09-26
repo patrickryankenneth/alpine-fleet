@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # e2e-test.sh — repeatable full-cycle test: terminate -> launch -> jump ->
-# install -> harden -> assert. Usage: e2e-test.sh [--runs N] [--debug] [--prepare]
+# install -> harden -> assert. Usage: e2e-test.sh [--runs N] [--debug] [--prepare] [--provider oci|gcp]
 # --prepare builds the host-side kexec cache first (needs podman or docker).
+# --provider selects which cloud to test against (default: oci); it picks
+# the matching teardown script and is passed through to orchestrate.py.
 #
 # Each cycle terminates the state-file E2 instance (if any), then lets
 # orchestrate.py launch a fresh one and drive it to the final state. Stops at
@@ -11,19 +13,27 @@ set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_DIR="${ALPINE_FLEET_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/alpine-fleet}"
 export ALPINE_FLEET_STATE_DIR="$STATE_DIR"
-STATE="$STATE_DIR/current-instance.json"
-RUNS=1; ORCH_ARGS=(); PREPARE=0
+RUNS=1; ORCH_ARGS=(); PREPARE=0; PROVIDER="oci"
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --runs)  RUNS="$2"; shift 2 ;;
-    --debug) ORCH_ARGS+=(--debug); shift ;;
-    --prepare) PREPARE=1; shift ;;
-    *) echo "Usage: e2e-test.sh [--runs N] [--debug] [--prepare]" >&2; exit 1 ;;
+    --runs)     RUNS="$2"; shift 2 ;;
+    --debug)    ORCH_ARGS+=(--debug); shift ;;
+    --prepare)  PREPARE=1; shift ;;
+    --provider) PROVIDER="$2"; shift 2 ;;
+    *) echo "Usage: e2e-test.sh [--runs N] [--debug] [--prepare] [--provider oci|gcp]" >&2; exit 1 ;;
   esac
 done
+STATE="$STATE_DIR/current-instance-$PROVIDER.json"
+
+case "$PROVIDER" in
+  oci) TEARDOWN_SCRIPT="teardown-e2.sh" ;;
+  gcp) TEARDOWN_SCRIPT="teardown-gcp.sh" ;;
+  *) echo "Usage: e2e-test.sh: unknown --provider '$PROVIDER' (must be oci or gcp)" >&2; exit 1 ;;
+esac
+ORCH_ARGS+=(--provider "$PROVIDER")
 
 if [[ $PREPARE == 1 ]]; then
-  bash "$DIR/prepare-kexec-cache.sh" || echo "WARN: cache preparation failed — continuing without the cache" >&2
+  bash "$DIR/prepare-kexec-cache.sh" --provider "$PROVIDER" || echo "WARN: cache preparation failed — continuing without the cache" >&2
 fi
 
 fail() { echo "FAIL (run $i/$RUNS): $*" >&2; exit 1; }
@@ -36,7 +46,7 @@ for i in $(seq 1 "$RUNS"); do
   td_start=$(date +%s)
   if [ -f "$STATE" ]; then
     TD_LOG="$(mktemp)"
-    bash "$DIR/teardown-e2.sh" --yes 2>&1 | tee "$TD_LOG"; td_rc=${PIPESTATUS[0]}
+    bash "$DIR/$TEARDOWN_SCRIPT" --yes 2>&1 | tee "$TD_LOG"; td_rc=${PIPESTATUS[0]}
     if [[ $td_rc -ne 0 ]]; then
       if grep -q "not among RUNNING instances" "$TD_LOG"; then
         echo "instance in the state file is already gone (e.g. an interrupted earlier run) — clearing stale state"
