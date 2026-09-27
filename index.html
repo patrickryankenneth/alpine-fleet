@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<!-- auto-generated-from-readme -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>patrickryankenneth/alpine-fleet</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/github-markdown-css/5.8.1/github-markdown.min.css">
+  <style>
+    body {
+      box-sizing: border-box;
+      min-width: 200px;
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 45px;
+    }
+    @media (max-width: 767px) {
+      body {
+        padding: 15px;
+      }
+    }
+  </style>
+</head>
+<body class="markdown-body">
+<h1 id="alpine-fleet">🏔️ alpine-fleet</h1>
+<blockquote>
+<p>Give me a disposable OCI micro VM, and I will deterministically and declaratively turn it into a lightweight, hardened Alpine machine.</p>
+</blockquote>
+<p><code>alpine-fleet</code> converts an Oracle Cloud (OCI) <strong>VM.Standard.E2.1.Micro</strong> instance from the stock Oracle Linux image into a minimal <strong>Alpine Linux</strong> install with <strong>key-only root SSH</strong> (no password). Once your OCI CLI is configured, a run is hands-off: it launches the instance, jumps it into Alpine with <code>kexec</code>, installs Alpine to the boot disk over the serial console, locks down SSH, and verifies the result. Proven on the E2.1.Micro across 50+ end-to-end runs.</p>
+<blockquote>
+<p>⚠️ <strong>Destructive operation</strong>
+This project installs Alpine onto <code>/dev/sda</code> and <strong>replaces the existing operating system</strong>. The orchestrator confirms the installer's "erase disk" prompt automatically. Use it only on disposable or recoverable instances.</p>
+</blockquote>
+<pre><code class="language-bash">pipx install 'alpine-fleet[oci]'
+alpine-fleet doctor          # checks your host, prints the install command for anything missing
+alpine-fleet up              # launch (if needed), convert, harden, verify
+</code></pre>
+<h2 id="why-do-this-the-ram-vampire">📊 Why do this? (The RAM Vampire)</h2>
+<p>The E2.1.Micro free-tier instance has 1 GB of RAM, so what the OS itself uses matters. Measured on OCI PHX over five runs:</p>
+<table>
+<thead>
+<tr>
+<th style="text-align: left;">Metric</th>
+<th style="text-align: left;">Stock Oracle Linux 7.9</th>
+<th style="text-align: left;">Alpine Linux 3.24</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;"><strong>RAM available to workloads</strong></td>
+<td style="text-align: left;">288–316 MB</td>
+<td style="text-align: left;"><strong>778–792 MB</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>In use (total − available)</strong></td>
+<td style="text-align: left;">351–379 MB</td>
+<td style="text-align: left;"><strong>167–181 MB</strong></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>Total the kernel reports</strong></td>
+<td style="text-align: left;">668 MB</td>
+<td style="text-align: left;">960 MB</td>
+</tr>
+</tbody>
+</table>
+<p>That is <strong>+472 to +500 MB (2.5–2.7×)</strong> more usable RAM.</p>
+<p>The stock boot reports <code>crashkernel=auto</code> and exposes noticeably less memory to the running system than Alpine's kernel does (this project did not measure exactly how much of that difference is the crash-kernel reservation). The rest of the improvement comes from Alpine's much smaller userspace. A full automated run takes about <strong>315–337 seconds</strong>.</p>
+<h2 id="install-and-requirements">🛠️ Install and requirements</h2>
+<pre><code class="language-bash">pipx install 'alpine-fleet[oci]'     # or: pip install 'alpine-fleet[oci]'
+alpine-fleet doctor                  # add --fix to be offered the install command
+</code></pre>
+<p>pip cannot install system packages, so <code>doctor</code> checks them for you (Python 3.9+; Linux, macOS or WSL; native Windows is not supported).</p>
+<table>
+<thead>
+<tr>
+<th style="text-align: left;">Tool</th>
+<th style="text-align: left;">Needed for</th>
+<th style="text-align: left;">How to get it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;"><strong>OCI CLI</strong></td>
+<td style="text-align: left;">Launch, teardown, capacity discovery</td>
+<td style="text-align: left;">Installed by the <code>[oci]</code> extra, then run <code>oci setup config</code></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong><code>jq</code></strong></td>
+<td style="text-align: left;">JSON handling in the shell scripts</td>
+<td style="text-align: left;"><code>pacman -S jq</code>, <code>apt install jq</code>, <code>dnf install jq</code>, <code>brew install jq</code></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>OpenSSH</strong> (<code>ssh</code>, <code>scp</code>, <code>ssh-keygen</code>)</td>
+<td style="text-align: left;">Remote staging and serial tunneling</td>
+<td style="text-align: left;">System package (<code>openssh-client</code> on Debian/Ubuntu)</td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong>bash 4+</strong></td>
+<td style="text-align: left;">The shell scripts</td>
+<td style="text-align: left;">macOS ships 3.2: <code>brew install bash</code></td>
+</tr>
+<tr>
+<td style="text-align: left;"><strong><code>podman</code></strong> or <strong><code>docker</code></strong> <em>(optional)</em></td>
+<td style="text-align: left;"><code>alpine-fleet cache</code> (faster runs)</td>
+<td style="text-align: left;">System package manager</td>
+</tr>
+</tbody>
+</table>
+<p>You also need free E2.1.Micro capacity in your OCI region, a VCN with a public subnet, and an SSH keypair (default public key: <code>~/.ssh/id_ed25519.pub</code>, and its private key must be your default SSH identity).</p>
+<p>The OCI serial console proxy requires an <strong>RSA</strong> key (Ed25519 is rejected), by default <code>~/.ssh/oci-console-rsa</code>. If you don't have one:</p>
+<pre><code class="language-bash">ssh-keygen -t rsa -b 4096 -f ~/.ssh/oci-console-rsa -N ''
+</code></pre>
+<p>Working from a checkout instead: <code>pip install -e '.[oci]'</code>.</p>
+<h2 id="usage">🚀 Usage</h2>
+<table>
+<thead>
+<tr>
+<th style="text-align: left;">Command</th>
+<th style="text-align: left;">What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;"><code>alpine-fleet doctor [--fix]</code></td>
+<td style="text-align: left;">Check host requirements; print the install command for anything missing.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>alpine-fleet discover</code></td>
+<td style="text-align: left;">Show E2.1.Micro and A1.Flex headroom per availability domain, discovered dynamically.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>alpine-fleet up [--yes] [--debug] [--no-launch]</code></td>
+<td style="text-align: left;">Launch an instance if none is running (retries until capacity appears), then convert, harden and verify. Prints phase timings and a RAM comparison, and ends with the <code>ssh root@&lt;ip&gt;</code> command.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>alpine-fleet convert USER@IP INSTANCE_OCID</code></td>
+<td style="text-align: left;">Convert an existing instance. You must type its address to confirm (or pass <code>--yes</code>).</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>alpine-fleet down [--yes]</code></td>
+<td style="text-align: left;">Terminate the instance recorded in the state file.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>alpine-fleet cache [--force]</code></td>
+<td style="text-align: left;">Build the Oracle Linux 7 <code>kexec</code> binary cache in a container (skips installing <code>kexec-tools</code> on the target).</td>
+</tr>
+</tbody>
+</table>
+<p><code>up</code> and <code>convert</code> also accept <code>--alpine-version</code> (default <code>v3.24</code>), <code>--ssh-pubkey</code>, <code>--console-key</code> and <code>--answerfile</code>.</p>
+<p>Every run detects where the box is (stock OS, Alpine in RAM, or installed) and resumes from there, so an interrupted run can simply be repeated.</p>
+<p><strong>Where things live.</strong> Instance state and serial transcripts (instance IDs and IPs) are in <code>~/.local/state/alpine-fleet/</code>; the kexec cache is in <code>~/.cache/alpine-fleet/kexec/</code>. Nothing is written to the install directory.</p>
+<p><strong>Environment overrides.</strong></p>
+<table>
+<thead>
+<tr>
+<th style="text-align: left;">Variable</th>
+<th style="text-align: left;">Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;"><code>SUBNET_ID</code>, <code>IMAGE_ID</code>, <code>COMPARTMENT_ID</code></td>
+<td style="text-align: left;">Override auto-discovery (default: first subnet found, newest compatible Oracle Linux image, tenancy root compartment).</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>DISPLAY_NAME</code>, <code>SSH_KEY_FILE</code></td>
+<td style="text-align: left;">Instance name and the public key given to the stock image's <code>opc</code> user.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>OCI_BIN</code>, <code>OCI_CONFIG_FILE</code></td>
+<td style="text-align: left;">Use a specific <code>oci</code> binary or config file.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>ALPINE_FLEET_STATE_DIR</code>, <code>KEXEC_CACHE</code></td>
+<td style="text-align: left;">Relocate state and cache.</td>
+</tr>
+<tr>
+<td style="text-align: left;"><code>NO_KEXEC_CACHE=1</code></td>
+<td style="text-align: left;">Ignore the cache and install <code>kexec-tools</code> on the target.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="before-you-run-it">⚠️ Before you run it</h2>
+<p><strong>This project is intentionally destructive.</strong> The answerfile installs to <code>/dev/sda</code> and replaces the existing operating system. Do not run it against a VM that holds data you need. The orchestrator waits for the installer's erase prompt and confirms it, but it does <em>not</em> check which disk the prompt names.</p>
+<p>The <code>kexec</code> transition is also disruptive: <strong>SSH to the stock OS disappears the moment the new kernel takes over.</strong> That is expected. The orchestrator treats the lost connection as a state transition and continues through the serial console.</p>
+<h2 id="how-it-works">⚙️ How it works</h2>
+<ol>
+<li><strong>Launch:</strong> Provisions an E2.1.Micro in an availability domain with headroom and opens a serial console connection.</li>
+<li><strong>Stage:</strong> Connects over SSH. Copies the cached <code>kexec</code> (or installs <code>kexec-tools</code> on the target if there is no cache), downloads the Alpine netboot kernel and initramfs in parallel, and loads them with <code>kexec -l</code>.</li>
+<li><strong>Jump:</strong> Triggers <code>kexec -e</code>. Alpine boots into RAM and downloads its ~290 MB module image from the Alpine mirror; that download's speed varies from run to run.</li>
+<li><strong>Install:</strong> Over the serial console: logs in, pushes your public key, starts <code>sshd</code>, pushes the answerfile (chunked base64) to <code>/root/answers</code>, and runs <code>setup-alpine -e -f /root/answers</code>. The root password prompt is bypassed with <code>-e</code>.</li>
+<li><strong>Reboot:</strong> Reboots off the physical block volume onto the installed disk.</li>
+<li><strong>Harden and verify:</strong> Root's password field is set to <code>*</code>, <code>PermitRootLogin prohibit-password</code> and <code>PasswordAuthentication no</code> are written to <code>sshd_config</code>, and a fresh key-only login is tested (retried while <code>sshd</code> settles). If that login is refused, the hardening changes (<code>sshd_config</code> and root's shadow entry) are <strong>rolled back</strong> through a session held open across the change, and <code>sshd</code>'s log is printed.</li>
+</ol>
+<h3 id="the-versus-gotcha">🚨 The <code>*</code> versus <code>!</code> gotcha</h3>
+<p>BusyBox <code>passwd -l</code> writes a <code>!</code>-prefixed hash. Alpine's <code>sshd</code> is built without PAM, and without PAM, OpenSSH treats a <code>!</code> hash as a locked account and refuses <strong>public-key</strong> logins too. Setting the field to <code>*</code> blocks password logins but still allows SSH keys. <em>Use <code>*</code>.</em></p>
+<h2 id="known-limits">🚧 Known limits</h2>
+<ul>
+<li><strong>Provider support: OCI only, tested on VM.Standard.E2.1.Micro only.</strong> The bundled answerfile assumes <code>/dev/sda</code> and performs a destructive disk install. Other clouds, images and shapes need their own disk and device handling.</li>
+<li>The free tier allows two E2.1.Micro instances; <code>up</code> stops if two are already running.</li>
+<li>The <code>kexec</code> cache applies to the stock <strong>Oracle Linux 7</strong> image. Any other image misses the cache and falls back to installing <code>kexec-tools</code> on the target, which is much slower.</li>
+<li>Root ends key-only with no password. If your private key is lost, you must rebuild the instance.</li>
+<li>Boot time depends on the mirror; the orchestrator waits up to 10 minutes for the Alpine login prompt.</li>
+<li>macOS hosts need bash 4+ (see above) and have not been tested.</li>
+</ul>
+<h2 id="repository-layout">📂 Repository layout</h2>
+<pre><code class="language-text">src/alpine_fleet/
+  cli.py, doctor.py, paths.py   the `alpine-fleet` command
+  scripts/                      orchestrate.py, bootstrap.sh, launch/teardown/discover/console helpers, lib/
+  answerfiles/                  setup-alpine answerfile for the OCI micro
+licenses/, THIRD_PARTY_NOTICES.txt
+</code></pre>
+<p><code>scripts/e2e-test.sh</code> (a destructive full-cycle test) lives in the repo only and is not shipped in the wheel.</p>
+<h2 id="license">📄 License</h2>
+<p>MIT. Third-party notices are in <code>THIRD_PARTY_NOTICES.txt</code> and <code>licenses/</code>. The <code>kexec</code> binary in the cache is built locally from Oracle's own package and is never distributed with this project.</p>
+</body>
+</html>
