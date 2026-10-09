@@ -66,6 +66,14 @@ def _orchestrate(args: argparse.Namespace, target: str | None = None, ocid: str 
     if missing:
         print("Missing requirements: " + ", ".join(missing) + "\nRun: alpine-fleet doctor", file=sys.stderr)
         return 2
+    if getattr(args, "tailscale", False):
+        problem = doctor.tailscale_problem()
+        if problem:
+            print(f"--tailscale: {problem}\nRun: alpine-fleet doctor", file=sys.stderr)
+            return 2
+    if getattr(args, "k3s", False) and not getattr(args, "tailscale", False):
+        print("--k3s requires --tailscale (workers join over the tailnet).", file=sys.stderr)
+        return 2
     expect = target.split("@", 1)[-1] if target else None
     if not _confirm(expect, args.yes):
         print("Aborted.", file=sys.stderr)
@@ -74,11 +82,21 @@ def _orchestrate(args: argparse.Namespace, target: str | None = None, ocid: str 
     cmd = [sys.executable, str(SCRIPTS / "orchestrate.py"),
            "--script-dir", str(SCRIPTS),
            "--answerfile", args.answerfile,
-           "--state-file", str(state / "current-instance.json"),
+           "--state-file", str(state / f"current-instance-{args.provider}.json"),
            "--serial-log", str(state / "serial.log"),
            "--alpine-version", args.alpine_version,
            "--ssh-pubkey", args.ssh_pubkey,
            "--provider", args.provider]
+    if getattr(args, "tailscale", False):
+        cmd.append("--tailscale")
+        if getattr(args, "tailscale_alias", None):
+            cmd += ["--tailscale-alias", args.tailscale_alias]
+    if getattr(args, "k3s", False):
+        cmd.append("--k3s")
+        if args.k3s_no_taint:
+            cmd.append("--k3s-no-taint")
+        if args.k3s_token_cmd:
+            cmd += ["--k3s-token-cmd", args.k3s_token_cmd]
     if args.console_key:
         cmd += ["--key", args.console_key]
     if args.debug:
@@ -99,6 +117,13 @@ def _add_run_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument("--console-key", default=None, help="RSA key for the OCI serial console (default: ~/.ssh/oci-console-rsa)")
     p.add_argument("--answerfile", default=str(ANSWERFILE), help="setup-alpine answerfile (default: the bundled OCI one)")
     p.add_argument("--provider", choices=["oci", "gcp"], default="oci", help="cloud provider (default: %(default)s)")
+    p.add_argument("--tailscale", action="store_true",
+                   help="join the node to your tailnet after install (see: alpine-fleet doctor)")
+    p.add_argument("--tailscale-alias", default=None,
+                   help="tailnet hostname (default: <provider>-node)")
+    p.add_argument("--k3s", action="store_true", help="join your k3s cluster as a worker (requires --tailscale)")
+    p.add_argument("--k3s-no-taint", action="store_true", help="don't taint the node fleet=true:NoSchedule")
+    p.add_argument("--k3s-token-cmd", default=None, help="command that prints the k3s join token")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -142,7 +167,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "discover":
         return _bash("discover-capacity.sh", extra)
     if args.cmd == "down":
-        return _bash("teardown-e2.sh", extra)
+        provider = "oci"
+        rest = []
+        it = iter(extra)
+        for tok in it:
+            if tok == "--provider":
+                provider = next(it, "oci")
+            elif tok.startswith("--provider="):
+                provider = tok.split("=", 1)[1]
+            else:
+                rest.append(tok)
+        if provider not in ("oci", "gcp"):
+            print(f"unknown provider '{provider}' (use oci or gcp)", file=sys.stderr)
+            return 2
+        return _bash("teardown-gcp.sh" if provider == "gcp" else "teardown-e2.sh", rest)
     if args.cmd == "cache":
         return _bash("prepare-kexec-cache.sh", extra)
     if args.cmd == "up":

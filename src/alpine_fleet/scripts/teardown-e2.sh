@@ -6,6 +6,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/oci-common.sh"
+source "$SCRIPT_DIR/lib/tailscale-common.sh"
+source "$SCRIPT_DIR/lib/k3s-common.sh"
 STATE_FILE="${ALPINE_FLEET_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/alpine-fleet}/current-instance-oci.json"
 
 TARGET=""; YES=false; LIST=false
@@ -54,6 +56,15 @@ fi
     --preserve-boot-volume false \
     --force \
     --wait-for-state SUCCEEDED
+
+K3S_NODE="$(jq -r '.k3s_node // empty' "$STATE_FILE" 2>/dev/null || true)"
+if [ -n "$K3S_NODE" ]; then k3s_delete_node "$K3S_NODE"; fi
+
+TS_NAME="${TS_ALIAS:-}"
+[ -n "$TS_NAME" ] || TS_NAME="$(jq -r '.ts_alias // empty' "$STATE_FILE" 2>/dev/null || true)"
+if [ -n "$TS_NAME" ] || [ "${TAILSCALE:-0}" = "1" ]; then
+    ts_delete_alias "${TS_NAME:-oci-node}" || echo "WARN: Tailscale cleanup failed" >&2
+fi
 
 if [ -f "$STATE_FILE" ] && [ "$(jq -r '.instance_id' "$STATE_FILE")" = "$TARGET" ]; then
     mv "$STATE_FILE" "$STATE_FILE.terminated"

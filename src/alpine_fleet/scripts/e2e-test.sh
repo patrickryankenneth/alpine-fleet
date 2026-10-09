@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # e2e-test.sh — repeatable full-cycle test: terminate -> launch -> jump ->
-# install -> harden -> assert. Usage: e2e-test.sh [--runs N] [--debug] [--prepare] [--provider oci|gcp]
+# install -> harden -> assert. Usage: e2e-test.sh [--runs N] [--debug] [--prepare] [--provider oci|gcp] [--tailscale]
 # --prepare builds the host-side kexec cache first (needs podman or docker).
 # --provider selects which cloud to test against (default: oci); it picks
 # the matching teardown script and is passed through to orchestrate.py.
@@ -13,14 +13,17 @@ set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_DIR="${ALPINE_FLEET_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/alpine-fleet}"
 export ALPINE_FLEET_STATE_DIR="$STATE_DIR"
-RUNS=1; ORCH_ARGS=(); PREPARE=0; PROVIDER="oci"
+source "$DIR/lib/k3s-common.sh"
+RUNS=1; ORCH_ARGS=(); PREPARE=0; PROVIDER="oci"; TAILSCALE=0; K3S=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --runs)     RUNS="$2"; shift 2 ;;
     --debug)    ORCH_ARGS+=(--debug); shift ;;
     --prepare)  PREPARE=1; shift ;;
     --provider) PROVIDER="$2"; shift 2 ;;
-    *) echo "Usage: e2e-test.sh [--runs N] [--debug] [--prepare] [--provider oci|gcp]" >&2; exit 1 ;;
+    --tailscale) ORCH_ARGS+=(--tailscale); TAILSCALE=1; export TAILSCALE; shift ;;
+    --k3s)       ORCH_ARGS+=(--tailscale --k3s); TAILSCALE=1; K3S=1; export TAILSCALE; shift ;;
+    *) echo "Usage: e2e-test.sh [--runs N] [--debug] [--prepare] [--provider oci|gcp] [--tailscale] [--k3s]" >&2; exit 1 ;;
   esac
 done
 STATE="$STATE_DIR/current-instance-$PROVIDER.json"
@@ -44,8 +47,11 @@ for i in $(seq 1 "$RUNS"); do
 
   echo "== teardown =="
   td_start=$(date +%s)
+  PREV_TS=""; PREV_K3S=""; td_rc=0
   if [ -f "$STATE" ]; then
     TD_LOG="$(mktemp)"
+    PREV_TS="$(jq -r '.ts_alias // empty' "$STATE" 2>/dev/null || true)"
+    PREV_K3S="$(jq -r '.k3s_node // empty' "$STATE" 2>/dev/null || true)"
     bash "$DIR/$TEARDOWN_SCRIPT" --yes 2>&1 | tee "$TD_LOG"; td_rc=${PIPESTATUS[0]}
     if [[ $td_rc -ne 0 ]]; then
       if grep -q "not among RUNNING instances" "$TD_LOG"; then
@@ -58,6 +64,26 @@ for i in $(seq 1 "$RUNS"); do
     rm -f "$TD_LOG"
   else
     echo "no state file — nothing to tear down"
+  fi
+
+  if [[ $TAILSCALE == 1 && -n "$PREV_TS" && $td_rc -eq 0 ]]; then
+    gone=0
+    for _ in 1 2 3 4 5 6; do
+      if ! tailscale status 2>/dev/null | awk '{print $2}' | grep -qx "$PREV_TS"; then gone=1; break; fi
+      sleep 2
+    done
+    [[ $gone == 1 ]] || fail "tailnet device '$PREV_TS' still present after teardown"
+    echo "tailnet cleanup ok: $PREV_TS removed"
+  fi
+
+  if [[ $K3S == 1 && -n "$PREV_K3S" && $td_rc -eq 0 ]]; then
+    gone=0
+    for _ in 1 2 3 4 5 6; do
+      if ! $(k3s_kubectl) get node "$PREV_K3S" >/dev/null 2>&1; then gone=1; break; fi
+      sleep 2
+    done
+    [[ $gone == 1 ]] || fail "k3s node '$PREV_K3S' still registered after teardown"
+    echo "k3s cleanup ok: $PREV_K3S removed"
   fi
 
   echo "teardown took $(( $(date +%s) - td_start ))s"
@@ -80,6 +106,25 @@ for i in $(seq 1 "$RUNS"); do
   echo "$OUT" | grep -qE '^root_shadow=[!*]'  || fail "root password not disabled (shadow field should start with '*' or '!')"
   echo "$OUT" | grep -q '^passwordauthentication no' || fail "sshd still allows password authentication"
   echo "$OUT" | grep -qE '^permitrootlogin (prohibit-password|without-password)' || fail "PermitRootLogin is not key-only"
+  if [[ $TAILSCALE == 1 ]]; then
+    TS_NAME="$(jq -r '.ts_alias // empty' "$STATE")"
+    [ -n "$TS_NAME" ] || fail "no ts_alias in state file (tailscale join failed?)"
+    ts_ok=0
+    for _ in 1 2 3 4 5 6; do
+      if ssh -o ControlPath=none -o ControlMaster=no -o BatchMode=yes -o StrictHostKeyChecking=no \
+           -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10 "root@$TS_NAME" \
+           'tailscale ip -4' >/dev/null 2>&1; then ts_ok=1; break; fi
+      sleep 5
+    done
+    [[ $ts_ok == 1 ]] || fail "ssh over tailnet to root@$TS_NAME"
+    echo "tailnet ok: ssh root@$TS_NAME"
+  fi
+  if [[ $K3S == 1 ]]; then
+    K3S_NODE="$(jq -r '.k3s_node // empty' "$STATE")"
+    [ -n "$K3S_NODE" ] || fail "no k3s_node in state file (k3s join failed?)"
+    bash "$DIR/k3s-check.sh" "$K3S_NODE" || fail "pod DNS on k3s node $K3S_NODE"
+    echo "k3s ok: $K3S_NODE"
+  fi
   echo "PASS run $i/$RUNS in $(( $(date +%s) - start ))s at root@$IP"
 done
 echo "ALL $RUNS RUN(S) PASSED"

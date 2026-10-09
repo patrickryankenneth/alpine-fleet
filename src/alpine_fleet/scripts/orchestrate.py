@@ -436,6 +436,16 @@ def main():
                      help="Never launch an instance; fail if the state file has none.")
     ap.add_argument("--provider", choices=["oci", "gcp"], default="oci",
                      help="cloud provider console/backend to use (default: %(default)s)")
+    ap.add_argument("--tailscale", action="store_true",
+                    help="After install, join the node to the tailnet (needs a Tailscale API key; see tailscale-common.sh).")
+    ap.add_argument("--tailscale-alias", default=None,
+                    help="Tailnet hostname (default: <provider>-node).")
+    ap.add_argument("--k3s", action="store_true",
+                    help="After the tailnet join, join the node to your k3s cluster as a worker (needs --tailscale).")
+    ap.add_argument("--k3s-no-taint", action="store_true",
+                    help="Don't taint the node fleet=true:NoSchedule.")
+    ap.add_argument("--k3s-token-cmd", default=None,
+                    help="Shell command that prints the k3s join token (for remote servers).")
     ap.add_argument("--ssh-pubkey", default=str(Path.home() / ".ssh" / "id_ed25519.pub"),
                      help="Public key installed into /root/.ssh/authorized_keys on the "
                           "live RAM environment BEFORE setup-disk runs, so it carries "
@@ -567,6 +577,7 @@ def main():
         mark("staging (kexec-tools + netboot downloads)")
         print("[orchestrate] staged. Triggering the jump (kexec -e)...")
         subprocess.run(["ssh", "-o", "ConnectTimeout=5", args.ssh_target, "sudo", "kexec", "-e"])
+        subprocess.run(["ssh-keygen", "-R", ip], capture_output=True)  # new OS, new host key
         print("[orchestrate] watching serial for Alpine boot (up to 10 min; it downloads a ~290 MB module image at boot, so speed varies)...")
         waited = 0
         while True:
@@ -678,9 +689,46 @@ def main():
             print(f"[orchestrate] RAM on Alpine: {a_avail} MB available, {a_used} MB in use, of {a_total} MB "
                   f"(no 'before' figure: run resumed after the jump)")
     mark("harden + verify")
+    ts_alias = None
+    if args.tailscale:
+        ts_alias = args.tailscale_alias or f"{args.provider}-node"
+        print(f"[orchestrate] joining tailnet as '{ts_alias}'...")
+        r = subprocess.run(["bash", f"{args.script_dir}/tailscale-join.sh", f"root@{ip}", ts_alias])
+        if r.returncode == 0:
+            try:
+                st = json.loads(Path(args.state_file).read_text())
+                st["ts_alias"] = ts_alias
+                Path(args.state_file).write_text(json.dumps(st, indent=2))
+            except Exception as e:
+                print(f"[orchestrate] WARN: could not record ts_alias in state file: {e}", file=sys.stderr)
+            mark("tailscale join")
+        else:
+            print("[orchestrate] WARN: tailscale join failed; node is still reachable via its public IP.", file=sys.stderr)
+    if args.k3s:
+        if not ts_alias:
+            print("[orchestrate] WARN: --k3s skipped: the node is not on the tailnet.", file=sys.stderr)
+        else:
+            env = dict(os.environ, K3S_TAINT="0" if args.k3s_no_taint else "1")
+            if args.k3s_token_cmd:
+                env["K3S_TOKEN_CMD"] = args.k3s_token_cmd
+            print(f"[orchestrate] joining k3s cluster as '{ts_alias}'...")
+            r = subprocess.run(["bash", f"{args.script_dir}/k3s-join.sh", f"root@{ip}", ts_alias], env=env)
+            if r.returncode == 0:
+                try:
+                    st = json.loads(Path(args.state_file).read_text())
+                    st["k3s_node"] = ts_alias
+                    Path(args.state_file).write_text(json.dumps(st, indent=2))
+                except Exception as e:
+                    print(f"[orchestrate] WARN: could not record k3s_node in state file: {e}", file=sys.stderr)
+                mark("k3s join")
+            else:
+                print("[orchestrate] WARN: k3s join failed; node is still on the tailnet.", file=sys.stderr)
+            ts_alias = None
     print_timing()
     print("\n[orchestrate] done.")
     print(f"\nssh root@{ip}")
+    if ts_alias:
+        print(f"ssh root@{ts_alias}   (over the tailnet)")
 
 
 if __name__ == "__main__":
